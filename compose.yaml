@@ -1,0 +1,89 @@
+# Runtime container plus an optional local embedding container:
+#   trace2fuzz  the project's runtime environment, built from the Dockerfile in this directory
+#   embedding   Qwen3-Embedding-8B behind an OpenAI-compatible endpoint (vLLM)
+#
+#   docker compose up -d --wait                             use the external embedding endpoint in .env
+#   docker compose --profile local-embedding up -d --wait   also start the local embedding service
+#   docker compose exec trace2fuzz bash                     work inside the runtime container
+#
+# Settings come from the .env next to this file (see env.template); nothing secret is written here.
+name: trace2fuzz
+
+services:
+  trace2fuzz:
+    image: trace2fuzz:latest
+    build:
+      context: .
+      args:
+        HTTP_PROXY: ${T2F_PROXY:-}
+        HTTPS_PROXY: ${T2F_PROXY:-}
+        NO_PROXY: ${T2F_NO_PROXY:-localhost,127.0.0.1}
+    init: true
+    command: sleep infinity
+    working_dir: /Trace2Fuzz
+    volumes:
+      # Library recipes, configuration, and run outputs live in the mounted repository.
+      - .:/Trace2Fuzz
+      # The ChatGPT login saved by `opencode auth login` (LLM_PROVIDER=openai): a volume keeps it
+      # across container re-creation and out of the repository.
+      - opencode-login:/root/.local/share/opencode
+    environment:
+      HTTP_PROXY: ${T2F_PROXY:-}
+      HTTPS_PROXY: ${T2F_PROXY:-}
+      http_proxy: ${T2F_PROXY:-}
+      https_proxy: ${T2F_PROXY:-}
+      NO_PROXY: ${T2F_NO_PROXY:-localhost,127.0.0.1},embedding,host.docker.internal
+      no_proxy: ${T2F_NO_PROXY:-localhost,127.0.0.1},embedding,host.docker.internal
+      # Keep the endpoint and model paired. For the local profile, set both to
+      # http://embedding:8000/v1 and qwen3-embedding-8b in .env.
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:?set EMBEDDING_API_BASE in .env}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:?set EMBEDDING_MODEL in .env}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?set EMBEDDING_API_KEY in .env}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  embedding:
+    profiles: ["local-embedding"]
+    image: trace2fuzz-embedding:latest
+    build:
+      context: docker/embedding
+      args:
+        VLLM_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0-cu129}
+      additional_contexts:
+        # A downloaded copy of Qwen/Qwen3-Embedding-8B, copied into the image at build time.
+        weights: ${EMBEDDING_WEIGHTS_DIR:-./models/Qwen3-Embedding-8B}
+    command:
+      # The image always contains Qwen3-Embedding-8B weights, regardless of the
+      # external model selected for the runtime container.
+      - --served-model-name=qwen3-embedding-8b
+      - --dtype=${EMBEDDING_DTYPE:-auto}
+      - --max-model-len=${EMBEDDING_MAX_LEN:-8192}
+      - --max-num-batched-tokens=${EMBEDDING_MAX_LEN:-8192}
+      - --gpu-memory-utilization=${EMBEDDING_GPU_UTIL:-0.3}
+    environment:
+      VLLM_API_KEY: ${EMBEDDING_API_KEY:?set EMBEDDING_API_KEY in .env}
+    ports:
+      - ${EMBEDDING_PORT:-8001}:8000
+    ipc: host
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${EMBEDDING_GPU:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10m
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"
+
+volumes:
+  opencode-login:

@@ -1,0 +1,4 @@
+{
+    "chatgpt.openOnStartup": true,
+    "python.terminal.activateEnvironment": false
+}

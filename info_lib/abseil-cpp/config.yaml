@@ -1,0 +1,11 @@
+language: cpp
+
+compile_config:
+  sanitize_library: "./test_lib/abseil-cpp/build_sanitize/libabsl_strings_complete.a"
+  analysis_library: "./test_lib/abseil-cpp/build_analysis/libabsl_trace2fuzz.so"
+  coverage_library: "./test_lib/abseil-cpp/build_coverage/libabsl_strings_complete.a"
+  additional_libs: ["-lpthread", "-ldl"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

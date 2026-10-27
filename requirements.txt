@@ -1,0 +1,21 @@
+numpy==1.26.4
+cmake==4.3.0
+loguru==0.7.2
+PyYAML==6.0.2
+libclang==16.0.6
+json5==0.14.0
+langchain==0.3.27
+langchain-core==0.3.79
+langchain-openai==0.3.33
+langchain-community==0.3.31
+python-dotenv==1.1.1
+tqdm==4.66.5
+faiss-cpu==1.7.4
+anyio==4.11.0
+mcp==1.26.0
+rich==14.2.0
+# Unit-audit backend: function enumeration. Pinned exactly, because a grammar
+# release that renames a node type silently changes which units are enumerated.
+tree-sitter==0.26.0
+tree-sitter-c==0.24.2
+tree-sitter-cpp==0.23.4

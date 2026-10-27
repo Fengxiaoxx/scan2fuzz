@@ -1,0 +1,12 @@
+language: c
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/lcms/build_sanitize/src/.libs/liblcms2.a"
+  analysis_library: "./test_lib/lcms/build_analysis/src/.libs/liblcms2.so"  # For API extraction
+  coverage_library: "./test_lib/lcms/build_coverage/src/.libs/liblcms2.a"
+  additional_libs: ["-lm", "-lpthread"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

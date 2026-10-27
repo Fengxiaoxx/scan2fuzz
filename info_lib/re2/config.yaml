@@ -1,0 +1,27 @@
+language: cpp
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/re2/build_sanitize/libre2_complete.a"
+  analysis_library: "./test_lib/re2/build_analysis/libre2.so"  # For API extraction
+  coverage_library: "./test_lib/re2/build_coverage/libre2_complete.a"
+  additional_libs: ["-lpthread"]
+
+# Only re2's own headers: libre2.so also exports the Abseil code it links in.
+public_api:
+  include_transitive_declarations: false
+  entry_headers:
+    - "re2/filtered_re2.h"
+    - "re2/re2.h"
+    - "re2/set.h"
+    - "re2/stringpiece.h"
+
+# Abseil headers are installed for RE2 consumers, but Abseil's source tree is
+# a separate dependency and must not become an RE2 audit target.
+unit_audit:
+  exclude_installed_header_prefixes:
+    - "absl/"
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

@@ -1,0 +1,15 @@
+language: c
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/c-ares/build_sanitize/src/lib/.libs/libcares.a"
+  analysis_library: "./test_lib/c-ares/build_analysis/src/lib/.libs/libcares.so"  # For API extraction
+  coverage_library: "./test_lib/c-ares/build_coverage/src/lib/.libs/libcares.a"
+  additional_libs: ["-lpthread"]
+
+public_api:
+  entry_headers: ["ares.h"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

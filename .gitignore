@@ -1,0 +1,40 @@
+# Downloaded sources and generated experiment data.
+/test_lib/
+/workspace/
+/.local/
+/packaged_drivers/
+/fuzz_packages/
+/test_lib-snapshot-*/
+/workspace-backup-*.tar.gz
+/trace2fuzz_img.tar
+# OSS-Fuzz checkout used by packaging (pinned commit, see README).
+/security/
+
+# Retired generated artifacts.
+/artifacts/
+
+# Keep library configuration and packaging recipes, not analysis/build output.
+/info_lib/*/*
+!/info_lib/*/config.yaml
+!/info_lib/*/build.sh
+!/info_lib/*/oss_fuzz/
+
+# Python caches and logs.
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local credentials and agent configuration.
+.env
+.env.*
+.codex
+
+# Existing local exclusion; retained until its producer is identified.
+pass
+models/
+
+# Local SSH key and crash dumps are never source artifacts.
+/key
+/core.*

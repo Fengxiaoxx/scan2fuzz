@@ -1,0 +1,16 @@
+# Source: https://github.com/nghttp2/nghttp2 (master)
+# Adapted at commit 7e10fcf3c58e692902939bab8f898bdd9ec9cff7, 2026-10-14.
+language: c
+
+compile_config:
+  sanitize_library: "./test_lib/nghttp2/build_sanitize/lib/libnghttp2.a"
+  analysis_library: "./test_lib/nghttp2/build_analysis/lib/libnghttp2.so"
+  coverage_library: "./test_lib/nghttp2/build_coverage/lib/libnghttp2.a"
+  additional_libs: []
+
+public_api:
+  entry_headers: ["nghttp2/nghttp2.h"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

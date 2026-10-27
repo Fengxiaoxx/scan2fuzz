@@ -1,0 +1,18 @@
+# Source: https://github.com/DaveGamble/cJSON (master)
+# Adapted at commit 6d9f2443ab071f86e5d9b43025a40929ec41c46c, 2026-10-16.
+language: c
+
+compile_config:
+  sanitize_library: "./test_lib/cJSON/build_sanitize/libcjson_trace2fuzz.a"
+  analysis_library: "./test_lib/cJSON/build_analysis/libcjson_trace2fuzz.so"
+  coverage_library: "./test_lib/cJSON/build_coverage/libcjson_trace2fuzz.a"
+  additional_libs: ["-lm"]
+
+public_api:
+  entry_headers:
+    - "cjson/cJSON.h"
+    - "cjson/cJSON_Utils.h"
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

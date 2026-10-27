@@ -1,0 +1,14 @@
+# Only application sources and reproducible environment inputs enter the image.
+# Library recipes come from the mounted repository at run time; leaving info_lib/
+# out also keeps the build from walking generated outputs owned by the container.
+**
+!Dockerfile
+!requirements.txt
+!env.template
+!README.md
+!download_benchmark.sh
+!src/
+!src/**
+**/__pycache__/
+**/*.pyc
+**/*.pyo

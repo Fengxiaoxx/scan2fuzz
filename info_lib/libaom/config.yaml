@@ -1,0 +1,18 @@
+language: c
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/libaom/build_sanitize/libaom.a"
+  analysis_library: "./test_lib/libaom/build_analysis/libaom.so"
+  coverage_library: "./test_lib/libaom/build_coverage/libaom.a"
+  additional_libs: ["-lm", "-lpthread"]
+
+public_api:
+  entry_headers:
+    - "aom/aom_decoder.h"
+    - "aom/aomdx.h"
+    - "aom/aom_image.h"
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

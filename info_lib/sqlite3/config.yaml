@@ -1,0 +1,16 @@
+# SQLite 3.54.0 source snapshot: cdbfe6a93884bd1dceca9d971be95dba0fbadccb.
+# All variants build original source units and the same public extensions.
+language: c
+
+compile_config:
+  sanitize_library: "./test_lib/sqlite3/build_sanitize/libsqlite3.a"
+  analysis_library: "./test_lib/sqlite3/build_analysis/libsqlite3.so"
+  coverage_library: "./test_lib/sqlite3/build_coverage/libsqlite3.a"
+  additional_libs: ["-lpthread", "-ldl", "-lm"]
+
+public_api:
+  entry_headers: ["sqlite3.h", "sqlite3ext.h"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

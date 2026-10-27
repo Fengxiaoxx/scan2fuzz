@@ -1,0 +1,15 @@
+language: c
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/curl/build_sanitize/libcurl_complete.a"
+  analysis_library: "./test_lib/curl/build_analysis/shared/lib/libcurl.so"  # For API extraction
+  coverage_library: "./test_lib/curl/build_coverage/libcurl_complete.a"
+  additional_libs: ["-lpthread", "-lm"]
+
+public_api:
+  entry_headers: ["curl/curl.h"]
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600

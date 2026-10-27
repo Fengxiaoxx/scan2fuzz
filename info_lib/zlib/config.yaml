@@ -1,0 +1,12 @@
+language: c
+
+# 编译链接配置
+compile_config:
+  sanitize_library: "./test_lib/zlib/build_sanitize/libz.a"
+  analysis_library: "./test_lib/zlib/build_analysis/libz.so"  # For API extraction
+  coverage_library: "./test_lib/zlib/build_coverage/libz.a"
+  additional_libs: []
+
+driver_qualification:
+  chunk_seconds: 60
+  max_total_time: 3600
