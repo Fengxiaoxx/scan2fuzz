@@ -6,7 +6,6 @@
 !requirements.txt
 !env.template
 !README.md
-!download_benchmark.sh
 !src/
 !src/**
 **/__pycache__/

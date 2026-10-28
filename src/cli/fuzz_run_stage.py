@@ -20,7 +20,7 @@ STAGE = "fuzz_run"
 def _prepare_library(store) -> None:
     """Build missing pinned AFL++ tools and the ASan+UBSan static library."""
     subprocess.run(
-        ["bash", str(store.project_root / "scripts" / "setup_comparison_aflpp.sh")],
+        ["bash", str(store.project_root / "src" / "fuzz_run" / "setup_aflpp.sh")],
         cwd=store.project_root,
         check=True,
     )

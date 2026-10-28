@@ -46,9 +46,15 @@ services:
     profiles: ["local-embedding"]
     image: trace2fuzz-embedding:latest
     build:
-      context: docker/embedding
-      args:
-        VLLM_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0-cu129}
+      context: .
+      dockerfile_inline: |
+        FROM ${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0-cu129}
+        COPY --from=weights . /models/Qwen3-Embedding-8B
+        # Text embeddings do not require torchcodec. Remove the optional
+        # package whose CUDA dependencies conflict with the cu129 image.
+        RUN python3 -m pip uninstall -y torchcodec
+        ENV HF_HUB_OFFLINE=1
+        ENTRYPOINT ["vllm", "serve", "/models/Qwen3-Embedding-8B", "--runner=pooling"]
       additional_contexts:
         # A downloaded copy of Qwen/Qwen3-Embedding-8B, copied into the image at build time.
         weights: ${EMBEDDING_WEIGHTS_DIR:-./models/Qwen3-Embedding-8B}

@@ -1,183 +1,236 @@
 # Scan2Fuzz
 
-Scan2Fuzz 是面向 C/C++ 库的研究原型：将代码审计或静态分析产生的目标位置转换为 libFuzzer 驱动，经过编译修复、运行时检查和目标行覆盖测量后，将合格驱动合并为 AFL++ 测试程序。
+Scan2Fuzz is a research prototype for C/C++ libraries. It turns source locations
+reported by code audits or static analysis into libFuzzer drivers, checks their
+compilation and runtime behavior, measures target coverage, and merges qualified
+drivers into an AFL++ executable.
 
-当前主流程为：
+The pipeline is:
 
 ```text
 scan → preprocess → driver_rounds → fuzz_run
 ```
 
-本文对应当前 `src/cli/` 实现。服务器部署见 [Docker 部署说明](docker/README.md)。
+This document describes the current implementation in [src/cli](src/cli).
 
-## 代码与目录
+## Repository layout
 
-| 路径 | 职责 |
+| Path | Purpose |
 | --- | --- |
-| `src/cli/` | 命令行入口、阶段编排、并发参数和 run 配置绑定 |
-| `src/scan/` | 分析构建、扫描后端、告警规范化及证据保存 |
-| `src/preprocess/` | 公共 API 提取、调用关系、API 文档、事实库和向量索引 |
-| `src/driver_generation/` | 根据候选 API 和目标位置生成驱动 |
-| `src/compile_repair/` | 编译诊断修复和运行时崩溃归因、修复 |
-| `src/driver_refinement/` | 根据覆盖反馈调整驱动以提高目标可达性 |
-| `src/driver_qualification/` | libFuzzer 运行、覆盖测量、停滞判断和结果存储 |
-| `src/target_reachability/` | 对外的目标可达性接口，复用 `driver_qualification` 实现 |
-| `src/driver_rounds/` | 以目标为单位推进候选驱动状态机 |
-| `src/fuzz_run/` | 合格驱动筛选、合并构建、selector 种子和 AFL++ 运行 |
-| `src/llm/`、`src/tools/`、`src/knowledge/` | OpenCode 接入、工具调用、模型用量及语义检索 |
-| `src/core/`、`src/experiment/`、`src/ui/` | 配置与通用工具、run 存储与汇总、终端进度界面 |
-| `tests/` | `unittest` 测试类和 pytest 风格函数测试 |
-| `info_lib/<lib>/config.yaml`、`build.sh` | 每个库的配置及构建配方 |
-| `test_lib/<lib>/` | 下载的目标库源码；不随主仓库提交 |
-| `workspace/<lib>/` | run、独立构建和测试产物；不随主仓库提交 |
-| `docker/`、`scripts/` | 部署、自检、工具链准备和实验辅助脚本 |
-| `ablations/`、`docs/`、`results/`、`paper/`、`papers/` | 本地可选的实验和论文资料，不属于主程序的运行依赖 |
+| `src/cli/` | Command-line entry points, stage orchestration, concurrency, and run configuration |
+| `src/scan/` | Analysis builds, scan backends, finding normalization, and evidence storage |
+| `src/preprocess/` | Public APIs, call relationships, API documentation, fact bases, and vector indexes |
+| `src/driver_generation/` | Driver generation from candidate APIs and target locations |
+| `src/compile_repair/` | Compilation repair, runtime failure attribution, and driver repair |
+| `src/driver_refinement/` | Driver refinement using target coverage feedback |
+| `src/driver_qualification/` | libFuzzer execution, coverage measurement, progress monitoring, and artifacts |
+| `src/target_reachability/` | Target reachability interface backed by `driver_qualification` |
+| `src/driver_rounds/` | Per-target driver state machines |
+| `src/fuzz_run/` | Qualified driver selection, merged builds, selector seeds, and AFL++ execution |
+| `src/llm/`, `src/tools/`, `src/knowledge/` | OpenCode integration, tools, model usage, and semantic retrieval |
+| `src/core/`, `src/experiment/`, `src/ui/` | Shared configuration, run storage, summaries, and terminal progress |
+| `info_lib/<lib>/config.yaml`, `build.sh` | Library configuration and build recipes |
+| `test_lib/<lib>/` | Locally prepared library source checkouts; excluded from Git |
+| `workspace/<lib>/` | Run artifacts, standalone builds, and campaign results; excluded from Git |
 
-`info_lib/<lib>/` 中的 `raw/`、`txt/`、`api/`、`external/` 等目录是共享工作产物；追溯具体实验时，应读取 `workspace/<lib>/runs/<run_id>/` 中的快照。
+Generated directories such as `info_lib/<lib>/raw/`, `txt/`, `api/`, and
+`external/` contain shared working data. Use the snapshots under
+`workspace/<lib>/runs/<run_id>/` when tracing a particular experiment.
 
-## 环境准备
+The repository includes configurations for these 12 libraries:
+`abseil-cpp`, `c-ares`, `cJSON`, `curl`, `lcms`, `libaom`, `libjpeg-turbo`,
+`liblouis`, `nghttp2`, `re2`, `sqlite3`, and `zlib`.
 
-推荐使用根目录的 [Dockerfile](Dockerfile) 和 [compose.yaml](compose.yaml)。镜像内的主要工具为：
+## Environment
 
-| 工具 | 当前环境中的用途 |
+The root [Dockerfile](Dockerfile) and [compose.yaml](compose.yaml) define the
+runtime environment. Its main dependencies are:
+
+| Tool | Purpose |
 | --- | --- |
-| Python 3.11、[requirements.txt](requirements.txt) | 主程序及 Python 依赖，包括 CMake、tree-sitter、FAISS |
-| Clang/LLVM 15 | 库与驱动编译、libFuzzer、覆盖数据处理 |
-| LLVM 18 | bitcode 链接和两个原生分析工具的构建 |
-| clangd 20.1.8 | API 声明、头文件和签名解析 |
-| CodeQL CLI 2.25.4 | 分析数据库和结构查询；静态告警后端也使用它 |
-| Infer 1.2.0 | `codeql-infer` 告警后端 |
-| OpenCode 1.18.35、ripgrep | 模型会话和原生文件检索 |
-| AFL++ 4.33c | 最终合并驱动的测试；由准备脚本另行安装 |
+| Python 3.11 and [requirements.txt](requirements.txt) | Runtime dependencies, including CMake, tree-sitter, and FAISS |
+| Clang/LLVM 15 | Library and driver compilation, libFuzzer, and coverage processing |
+| LLVM 18 | Bitcode linking and compilation of the native analysis tools |
+| clangd 20.1.8 | API declarations, headers, and signatures |
+| CodeQL CLI 2.25.4 | Analysis databases and structural queries; also used by the static alert backend |
+| Infer 1.2.0 | The `codeql-infer` alert backend |
+| OpenCode 1.18.35 and ripgrep | Model sessions and native source retrieval |
+| AFL++ 4.33c | Final merged-driver campaigns; installed separately when needed |
 
-版本以 Dockerfile、requirements.txt 和 `scripts/setup_comparison_aflpp.sh` 为准。即使选择默认的 `unit-audit` 后端，仍需要 CodeQL 构建数据库并执行结构查询。
+Exact versions are defined in the Dockerfile, requirements file, and
+[AFL++ setup helper](src/fuzz_run/setup_aflpp.sh). CodeQL is required even with
+the default `unit-audit` backend because it builds databases and supplies
+structural queries.
 
-在仓库根目录执行：
+From the repository root:
 
 ```bash
 cp env.template .env
-# 编辑 .env，填写模型服务、模型名及密钥
-
+# Fill in the model endpoints, model names, and credentials in .env.
 docker compose build trace2fuzz
 docker compose up -d --wait
-docker compose exec trace2fuzz python3 docker/selfcheck.py
 docker compose exec trace2fuzz bash
 ```
 
-默认只启动运行容器，使用 `.env` 中的外部嵌入服务，无需本地 GPU。仓库挂载到 `/Trace2Fuzz`，源码和运行产物保存在宿主目录；镜像只包含应用代码和环境输入，不包含下载的库、实验数据或凭据。后续 Python 命令均在仓库根目录、配置好的运行环境中执行。
+The default Compose configuration starts the runtime container and uses the
+external embedding endpoint configured in `.env`. This configuration does not
+require a local GPU. The repository is mounted at `/Trace2Fuzz`, so library
+sources and generated artifacts persist on the host. Downloaded libraries,
+experiment data, and credentials are excluded from the runtime image.
 
-自检会调用嵌入服务、检查模型服务或登录状态，并发起一次真实 OpenCode 请求。需要代理时使用 `T2F_PROXY` 和 `T2F_NO_PROXY`；容器访问宿主服务可使用 `host.docker.internal`。
+Run the Python commands below from the repository root inside the prepared
+environment. Optional proxy settings are `T2F_PROXY` and `T2F_NO_PROXY`.
+Containers can reach services on the Docker host through `host.docker.internal`.
 
-### 可选：本地嵌入服务
+### Optional local embeddings
 
-将 Qwen3-Embedding-8B 权重放到 `models/Qwen3-Embedding-8B/`，或通过 `EMBEDDING_WEIGHTS_DIR` 指定已有权重目录。在 `.env` 中设置：
+Place Qwen3-Embedding-8B weights in `models/Qwen3-Embedding-8B/`, or set
+`EMBEDDING_WEIGHTS_DIR` to an existing weight directory. Configure:
 
 ```dotenv
 EMBEDDING_API_BASE="http://embedding:8000/v1"
 EMBEDDING_MODEL="qwen3-embedding-8b"
-EMBEDDING_API_KEY="<本地服务访问令牌>"
+EMBEDDING_API_KEY="<local-service-token>"
 ```
 
-然后构建并启动可选 profile：
+Then build and start the optional profile:
 
 ```bash
 docker compose --profile local-embedding build
 docker compose --profile local-embedding up -d --wait
 ```
 
-该镜像在构建时复制权重，需要 NVIDIA GPU 和可用的 GPU 容器环境。显卡、显存比例和端口等可选设置见 [compose.yaml](compose.yaml) 和 [Docker 部署说明](docker/README.md)；需要覆盖默认值时自行追加到 `.env`。
+The embedding image is defined inline in `compose.yaml` and copies the weights
+into the image during the build. It requires an NVIDIA GPU and a working GPU
+container runtime. See Compose for optional GPU selection, memory utilization,
+model length, port, and base-image settings.
 
-## 配置
+## Configuration
 
-### 模型与嵌入服务
+### Model and embedding services
 
-[env.template](env.template) 只保留模型和嵌入服务的六个必要字段，不预设供应商、外部服务地址或模型。下文的可选参数按需追加到 `.env`。使用自部署或其他 Chat Completions 兼容服务时，只需填写地址、密钥和模型名，无需设置 `LLM_PROVIDER`：
+[env.template](env.template) contains the six required fields without selecting
+a provider or model. Supply a Chat Completions-compatible endpoint and an
+embedding endpoint:
 
 ```dotenv
-LLM_BASE_URL="http://host.docker.internal:8000/v1"
-LLM_API_KEY='["<服务访问令牌>"]'
-LLM_MODEL="<服务实际提供的模型名>"
+LLM_BASE_URL="<chat-api-base-url>"
+LLM_API_KEY="<chat-api-key>"
+LLM_MODEL="<model-id>"
 
-EMBEDDING_API_BASE="<嵌入服务基础地址>"
-EMBEDDING_API_KEY="<嵌入服务密钥>"
-EMBEDDING_MODEL="<嵌入模型名>"
+EMBEDDING_API_BASE="<embedding-api-base-url>"
+EMBEDDING_API_KEY="<embedding-api-key>"
+EMBEDDING_MODEL="<embedding-model-id>"
 ```
 
-`LLM_BASE_URL` 填基础地址，不包含 `/chat/completions`。省略 `LLM_PROVIDER` 时，代码自动使用通用标识 `trace2fuzz_custom`。模型服务需要支持流式输出、工具调用，并有足够的上下文容量，部署细节见 Docker 文档。
+`LLM_BASE_URL` is the API base URL, without `/chat/completions`. No provider ID
+is needed: the code uses `trace2fuzz_custom` when `LLM_PROVIDER` is omitted.
+The model service must support streaming, tool calls, and a context window
+large enough for the requested tasks.
 
-| 变量 | 用途 |
+Optional overrides can be added to `.env`:
+
+| Variable | Purpose |
 | --- | --- |
-| `LLM_MODEL` | 全局模型名 |
-| `UNIT_AUDIT_MODEL` | `unit-audit` 扫描模型，可覆盖全局模型 |
-| `API_DOC_MODEL` | API 文档生成模型 |
-| `DRIVER_GEN_MODEL` | 驱动生成模型 |
-| `FIX_AGENT_MODEL` | 编译修复和运行时归因、修复模型 |
-| `REFINER_AGENT_MODEL` | 可达性调整模型 |
-| `OPENCODE_REASONING_EFFORT` | 推理强度；默认 `high`，可选值取决于模型 |
-| `OPENCODE_TEMPERATURE` | 未显式指定温度的会话使用此值；编译修复显式使用 `0` |
-| `EMBEDDING_BATCH_SIZE` | 索引构建每批文档数；默认 `20` |
+| `LLM_MODEL` | Global model selection |
+| `UNIT_AUDIT_MODEL` | Override for the `unit-audit` scan model |
+| `API_DOC_MODEL` | API documentation model |
+| `DRIVER_GEN_MODEL` | Driver generation model |
+| `FIX_AGENT_MODEL` | Compilation repair, runtime attribution, and repair model |
+| `REFINER_AGENT_MODEL` | Reachability refinement model |
+| `OPENCODE_REASONING_EFFORT` | Reasoning effort; defaults to `high`, with accepted values depending on the model |
+| `OPENCODE_TEMPERATURE` | Temperature for sessions without an explicit value; compilation repair explicitly uses `0` |
+| `EMBEDDING_BATCH_SIZE` | Documents per indexing batch; defaults to `20` |
 
-模型名通常按“阶段覆盖值 → `LLM_MODEL` → 代码默认值”解析，但创建 run 时必须能解析出四个下游阶段模型以及嵌入服务地址、模型名；建议明确设置 `LLM_MODEL`。切换全局模型时，也要清理旧的阶段覆盖值。
+Model selection generally follows a stage override, then `LLM_MODEL`, then a
+code default. Creating a run requires resolvable models for the four downstream
+agent roles, plus the embedding base URL and model. Set `LLM_MODEL` explicitly
+and remove stale stage overrides when changing the global model.
 
-每次模型请求启动隔离的 OpenCode 服务。自定义服务的凭据从 `.env` 或当前环境读取；`LLM_API_KEY` 接受单个字符串或 JSON 密钥列表。多密钥按每个进程的并发预算均衡分配，并记录不含密钥值的重试和冷却事件；单密钥直接连接。不同库的进程分别维护自己的密钥池。
+Each model request starts an isolated OpenCode service. Credentials are read
+from `.env` or the process environment. `LLM_API_KEY` accepts a single string
+or a JSON list of keys. With multiple keys, requests share the process's
+concurrency budget across key slots, with retry and cooldown events recorded
+without credential values. Processes for different libraries maintain separate
+key pools.
 
-项目也支持 OpenCode 保存的 ChatGPT 登录：显式设置 `LLM_PROVIDER=openai` 和 `LLM_MODEL`，清空 `LLM_BASE_URL`、`LLM_API_KEY`，再执行 `docker compose exec -it trace2fuzz opencode auth login`。可用模型通过 `opencode models openai` 查询；Compose 的 `opencode-login` 卷保存登录信息。
+An OpenCode ChatGPT login is also supported. Explicitly set
+`LLM_PROVIDER=openai` and `LLM_MODEL`, leave `LLM_BASE_URL` and `LLM_API_KEY`
+empty, and run `opencode auth login` inside the runtime container. Use
+`opencode models openai` to inspect available models. The Compose
+`opencode-login` volume persists the login separately from the repository.
 
-嵌入服务用于 FAISS 语义检索，构建和查询都发送原始文本。更换嵌入模型或向量维度后，需要重建对应索引；仅更换生成模型不要求重建嵌入索引。
+Embeddings power FAISS semantic retrieval. Raw text is sent both when building
+and querying an index. Rebuild the affected indexes after changing the
+embedding model or vector dimension. Changing only the generation model does
+not require rebuilding embedding indexes.
 
-### 库配置与源码
+### Library sources and recipes
 
-每个库至少需要：
+Prepare each library as its own Git checkout under `test_lib/`, using the
+revision required by your experiment. Library sources are obtained separately.
+Each configured library needs:
 
 ```text
-test_lib/<lib>/              独立的源码 Git checkout
-info_lib/<lib>/config.yaml   语言、链接配置、可达性运行时间等
-info_lib/<lib>/build.sh      构建入口
+test_lib/<lib>/              Independent source Git checkout
+info_lib/<lib>/config.yaml   Language, link settings, and runtime budgets
+info_lib/<lib>/build.sh      Build entry point
 ```
 
-可用 `bash download_benchmark.sh <lib>` 准备脚本支持的库；不带参数会准备脚本列出的全部库。具体版本和额外依赖由下载脚本与各库构建脚本决定。
+Additional source dependencies are determined by each build recipe. For
+example, the re2 recipe uses the sibling `abseil-cpp` checkout, and nghttp2
+requires its submodules.
 
-配置格式由 [src/core/config.py](src/core/config.py) 校验，示例见 [lcms 配置](info_lib/lcms/config.yaml)：
+The schema is validated by [src/core/config.py](src/core/config.py). See the
+[lcms configuration](info_lib/lcms/config.yaml) for an example:
 
-- `language`：`c` 或 `cpp`。
-- `compile_config`：`analysis_library`、`sanitize_library`、`coverage_library` 和 `additional_libs`。
-- `driver_qualification`：正整数 `chunk_seconds`、`max_total_time`。
-- 可选 `public_api`：入口头文件、语言标准、安装头文件的额外 include 子目录等。
-- 可选 `unit_audit.exclude_installed_header_prefixes`：排除非本库的安装头文件前缀。
+- `language`: `c` or `cpp`.
+- `compile_config`: `analysis_library`, `sanitize_library`, `coverage_library`,
+  and `additional_libs`.
+- `driver_qualification`: positive integers `chunk_seconds` and `max_total_time`.
+- Optional `public_api`: entry headers, language standard, and additional
+  include subdirectories for installed headers.
+- Optional `unit_audit.exclude_installed_header_prefixes`: installed-header
+  prefixes to exclude from this library's public API.
 
-构建变体为 `analysis`、`sanitize`、`coverage`、`aflpp`。新 run 的驱动使用 scan 冻结的安装公共头文件。扫描要求源码树与其独立 Git checkout 一致；允许的流水线目录和 Git 忽略的 autotools 引导产物规则见 [source_tree.py](src/scan/source_tree.py)。
+Build variants are `analysis`, `sanitize`, `coverage`, and `aflpp`. Drivers in
+new runs use the installed public headers frozen by the scan stage. Scanning
+requires the source tree to match its independent Git checkout. Allowed
+pipeline outputs and ignored autotools bootstrap files are defined in
+[source_tree.py](src/scan/source_tree.py).
 
-## Pipeline Commands
+## Pipeline commands
 
-### 阶段职责
-
-| 阶段 | 主要工作及下游输入 |
+| Stage | Work and downstream inputs |
 | --- | --- |
-| `scan` | 构建分析库、安装公共头文件、CodeQL 数据库和 bitcode；执行一个告警后端，冻结目标及结构证据 |
-| `preprocess` | 从公共 API、LLVM 直接调用关系及 CodeQL 绑定证据构建调用图、候选计划、API 文档、事实库和向量索引 |
-| `driver_rounds` | 独立推进每个目标的生成、编译、可达性测量、崩溃处理和调整 |
-| `fuzz_run` | 筛选合格驱动，合并为 ASan+UBSan AFL++ 程序并运行测试 |
+| `scan` | Analysis library, installed public headers, CodeQL database, and bitcode; one alert backend; frozen targets and structural evidence |
+| `preprocess` | Public APIs, structural call graphs, candidate plans, API documentation, fact bases, and vector indexes |
+| `driver_rounds` | Independent generation, compilation, reachability measurement, crash handling, and refinement for each target |
+| `fuzz_run` | Qualified driver selection, merged ASan+UBSan AFL++ build, and campaigns |
 
-默认告警后端为 `unit-audit`，通过 tree-sitter 枚举函数、分片并交给模型审计。也可显式选择 `codeql-infer`；两个后端互斥，不合并告警。当前结构分析使用 LLVM 原生提取器和 CodeQL，不依赖 SVF；下游候选输入为 `candidate_plan.json`。
-
-### 运行入口
+The default alert backend is `unit-audit`, which enumerates functions using
+tree-sitter and submits slices for model auditing. Alternatively, select
+`codeql-infer`. The backends are mutually exclusive. Structural analysis uses
+native LLVM extractors and CodeQL; it does not depend on SVF. Downstream
+candidate information is stored in `candidate_plan.json`.
 
 ```bash
-# 查看阶段及实际命令，不创建 run
+# List stages and commands without creating a run.
 python3 -m src.cli.pipeline <lib> --list
 
-# 完整流程；会进入最终 AFL++ 阶段
+# Run the complete pipeline, including the final AFL++ stage.
 python3 -m src.cli.pipeline <lib>
 
-# 只完成驱动生成与验证
+# Stop after driver generation and qualification.
 python3 -m src.cli.pipeline <lib> --to driver_rounds
 
-# 只扫描，或完成扫描和预处理
+# Run only scanning, or scanning followed by preprocessing.
 python3 -m src.cli.pipeline <lib> --only scan
 python3 -m src.cli.pipeline <lib> --to preprocess
 ```
 
-`scan` 创建 run 并打印 `Run ID`。各阶段也可以独立执行，后续阶段必须使用同一 run：
+The scan stage creates a run and prints its run ID. Stages can also be invoked
+individually; downstream stages must use the same run:
 
 ```bash
 python3 -m src.cli.scan <lib>
@@ -186,72 +239,106 @@ python3 -m src.cli.driver_rounds <lib> --run-id <run_id>
 python3 -m src.cli.fuzz_run_stage <lib> --run-id <run_id>
 ```
 
-阶段参数通过 `--stage-args '阶段=参数'` 传递，可重复使用。完整参数以各入口的 `--help` 为准。
+Use repeatable `--stage-args 'STAGE=ARGS'` options to forward arguments to a
+particular stage. Each entry point's `--help` documents its complete options.
 
-### 并发与时间预算
+### Concurrency and time budgets
 
-| 参数 | 默认值 | 作用范围 |
+| Option | Default | Scope |
 | --- | --- | --- |
-| pipeline 的 `--concurrency` | `4` | 传给 scan、preprocess、driver_rounds 的模型任务及同时请求数 |
-| `--fuzz-concurrency` | 当前可用 CPU 数 | driver_rounds 的可达性 fuzzer 池；独立于模型池 |
-| fuzz_run 的 `--concurrency` | `4` | 最终 AFL++ 同时运行的重复实验数 |
-| fuzz_run 的 `--repetitions` | `10` | 最终独立实验次数 |
-| fuzz_run 的 `--seconds-per-run` | `86400` | 每次最终实验时长，单位秒 |
-| fuzz_run 的 `--timeout-ms` | `5000` | 最终实验的单输入超时，单位毫秒 |
+| Pipeline `--concurrency` | `4` | Model tasks and simultaneous requests in scan, preprocess, and driver rounds |
+| `--fuzz-concurrency` | Available CPU count | Reachability fuzzer pool in driver rounds, independent of model concurrency |
+| Final-stage `--concurrency` | `4` | Concurrent final AFL++ repetitions |
+| Final-stage `--repetitions` | `10` | Number of independent campaigns |
+| Final-stage `--seconds-per-run` | `86400` | Duration of each final campaign, in seconds |
+| Final-stage `--timeout-ms` | `5000` | Timeout for one input in the final campaign, in milliseconds |
 
-每个可达性 fuzzer 最多使用约 2560 MB 内存，应按可用内存调整 `--fuzz-concurrency`。pipeline 的 `--concurrency` 不会传给最终阶段；最终阶段的设置需通过 `--stage-args 'fuzz_run=...'` 单独传递。可达性探测时间由库配置的 `driver_qualification` 控制。
+Each reachability fuzzer can use approximately 2560 MB of memory. Set
+`--fuzz-concurrency` according to the available memory. Pipeline
+`--concurrency` does not control the final stage; use
+`--stage-args 'fuzz_run=...'` for that stage's settings. Library
+`driver_qualification` settings control reachability probe duration.
 
-### 续跑与配置快照
+### Run snapshots and resuming
 
-run 创建时保存 `config/config.yaml`、`config/build.sh` 和 `config/agent-env.json`。模型 provider、基础地址、全局模型、四个下游阶段模型及嵌入地址、模型名会冻结；API 密钥从当前环境读取，不写入该快照。修改 `.env` 不会覆盖已有 run 的这些设置，切换配置应创建新 run。
+A new run saves `config/config.yaml`, `config/build.sh`, and
+`config/agent-env.json`. The provider, base URL, global model, four downstream
+agent models, and embedding endpoint/model are frozen. Credentials are read
+from the current environment and are excluded from this snapshot. Create a
+new run to change frozen configuration.
 
-`UNIT_AUDIT_MODEL`、`OPENCODE_REASONING_EFFORT`、`OPENCODE_TEMPERATURE` 和 `EMBEDDING_BATCH_SIZE` 当前不在冻结字段中，复现实验时需要另外保持一致。
+`UNIT_AUDIT_MODEL`, `OPENCODE_REASONING_EFFORT`, `OPENCODE_TEMPERATURE`, and
+`EMBEDDING_BATCH_SIZE` are currently outside the frozen fields. Keep them
+consistent when reproducing experiments.
 
-续跑必须显式从第一个待执行阶段开始，例如 scan 已完成时：
+Resume explicitly from the first pending stage. For example, after scanning:
 
 ```bash
 python3 -m src.cli.pipeline <lib> --run-id <run_id> --from preprocess
 ```
 
-程序不会自动跳过选中范围内已有 `result.json` 的阶段，而是拒绝覆盖；也会检查直接前置阶段的结果。没有 scan 目标时流程直接结束，没有 `REACHED` 驱动时最终阶段写入 `skipped`。
+The orchestrator refuses to overwrite a selected stage that already has a
+canonical `result.json`. It also checks each stage's immediate prerequisite.
+Scanning with zero targets ends the pipeline early. Without a `REACHED`
+driver, the final stage records `skipped`.
 
-中断但未写入阶段结果时，可复用同一 run 的已有检查点；unit-audit 只复用与请求摘要匹配的成功切片，driver_rounds 从追加的目标事件恢复。若失败阶段已经写入 canonical `result.json`，它也会阻止重跑；需先检查诊断并归档该结果，再明确重试。不要删除整个 run 或覆盖既有证据。同一个库受运行锁保护，不同库可以并行。
+Interrupted stages without a canonical result can reuse checkpoints from the
+same run. Unit-audit reuses successful slices only when request digests match;
+driver rounds resume from append-only target events. A failed stage that
+already wrote its canonical result also blocks a retry. Inspect diagnostics
+and archive that result before an explicit retry, preserving existing run
+evidence. Runs for the same library are protected by a lock; different
+libraries can run concurrently.
 
-最终阶段会保存 `plan.json`，未完成时重试要求参数一致。其 `campaign.json` 仅在整次 campaign 完成后写入；没有此检查点时重试会创建新的 campaign 目录，不会续接上一次 AFL++ 进程。
+The final stage saves a `plan.json`. Retries of a pending plan must use the
+same settings. It writes `campaign.json` only when the campaign completes.
+Without this checkpoint, a retry creates a new campaign directory rather than
+resuming the previous AFL++ process.
 
-## 驱动状态与结果含义
+## Driver states and interpretation
 
-每个目标独立遍历候选 API：
+Each target advances through candidate APIs independently:
 
 ```text
 READY_GENERATE → READY_COMPILE → READY_REACH
-                                  ├─ 命中 → REACHED
-                                  ├─ 未命中 → READY_REFINE → READY_COMPILE
-                                  └─ 崩溃 → READY_TRIAGE
-                                             ├─ 库问题 → CRASH
-                                             └─ 驱动修复 → READY_COMPILE
+                                  ├─ Hit → REACHED
+                                  ├─ No hit → READY_REFINE → READY_COMPILE
+                                  └─ Crash → READY_TRIAGE
+                                              ├─ Library issue → CRASH
+                                              └─ Driver repair → READY_COMPILE
 
-候选失败 → 下一候选的 READY_GENERATE；候选耗尽 → EXHAUSTED
-没有静态候选 → UNRESOLVED_STATIC
+Candidate failure → READY_GENERATE for the next candidate
+No candidates left → EXHAUSTED
+No static candidate → UNRESOLVED_STATIC
 ```
 
-`REACHED` 表示实际测到目标行命中；`CRASH` 表示 Repair Agent 将崩溃归因为库问题，需要结合保存的证据复核。静态调用链本身不代表运行时命中。
+`REACHED` means a target-line hit was measured at runtime. `CRASH` means the
+repair agent attributed a failure to the library; the stored evidence still
+requires review. A static call path alone does not establish runtime coverage.
 
-生成失败、编译修复、运行时修复和可达性调整的默认候选预算分别为 5 次，其中编译与运行时修复独立计数。基础设施失败单独记录并重试，不消耗候选预算；每次命令的基础设施重试预算由 `--max-infrastructure-retries` 控制，默认 5。调整后的驱动通过无崩溃的探测后才会成为稳定版本，失败会回滚。
+Generation, compilation repair, runtime repair, and reachability refinement
+each have a default candidate budget of five attempts. Compilation and runtime
+repair budgets are independent. Infrastructure failures are recorded and
+retried separately without consuming candidate budgets; the default
+`--max-infrastructure-retries` is five per command. A refined driver becomes
+the stable version after a successful probe without a crash; unsuccessful
+refinements are rolled back.
 
-驱动生成通过 OpenCode 原生 `read`、`grep`、`glob` 读取上下文，并通过 `find_api` 查询辅助 API。提示词、编译诊断、覆盖反馈和模型用量保存在 run 中，便于分析各次尝试。
+Driver generation uses OpenCode's native `read`, `grep`, and `glob` tools and
+the `find_api` helper. Prompts, compiler diagnostics, coverage feedback, and
+model usage are saved with the run.
 
-## 产物与日志
+## Artifacts and logs
 
 ```text
 workspace/<lib>/
 ├── runs/<run_id>/
 │   ├── run.json
 │   ├── pipeline.log
-│   ├── config/                     配置、构建脚本和非密钥环境快照
+│   ├── config/
 │   ├── stages/
-│   │   ├── scan/                   目标、告警、构建与结构证据
-│   │   ├── preprocess/             API、候选计划、事实库与索引
+│   │   ├── scan/
+│   │   ├── preprocess/
 │   │   ├── driver_rounds/
 │   │   │   ├── state-manifest.json
 │   │   │   ├── targets/<marker>/events/event-000001.json
@@ -260,8 +347,8 @@ workspace/<lib>/
 │   │   ├── compile_repair/<driver_id>/
 │   │   ├── target_reachability/<driver_id>/
 │   │   ├── driver_refinement/<driver_id>/
-│   │   └── fuzz_run/               最终实验计划、检查点及结果
-│   ├── state/drivers/<driver_id>/   Repair 会话状态
+│   │   └── fuzz_run/
+│   ├── state/drivers/<driver_id>/
 │   └── summary/
 │       ├── result.json
 │       ├── metrics.json
@@ -270,62 +357,78 @@ workspace/<lib>/
 └── fuzz_runs/<run_id>/<invocation>/
 ```
 
-重要文件均相对于 `runs/<run_id>/`：
+Important paths, relative to `runs/<run_id>/`, include:
 
-| 阶段 | 主要文件 |
+| Area | Artifacts |
 | --- | --- |
-| scan | `stages/scan/result.json`、`targets.txt`、`findings.json`、后端报告 `unit-audit-findings.json` 或 `codeql.sarif` / `infer-report.json` |
-| 分析构建 | `stages/scan/compile_commands.json`、`linked.bc`、`build-result.json`、`analysis-library/`、`public-install/include/` |
-| 结构证据 | `stages/scan/reachability/` 下的 `call_graph.direct.csv`、`function_locations.csv`、`include-edges.csv`、`provenance-edges.csv`、`scope.json` |
-| preprocess | `stages/preprocess/candidate_plan.json`、`structural/`、`api-doc-index.json`、`api-docs/`、`fact_base.json`、`drivers.json`、`faiss-index/` |
-| driver_rounds | `stages/driver_rounds/result.json` 和 `targets/<marker>/events/` 下的目标状态事件 |
-| 最终实验 | `stages/fuzz_run/plan.json`、`campaign.json`、`result.json`；完整输出位于 `workspace/<lib>/fuzz_runs/` |
-| 汇总 | `summary/result.json`、`summary/metrics.json`；每次 pipeline 调用另存 `summary/orchestration/` |
+| Scan | `stages/scan/result.json`, `targets.txt`, `findings.json`, and backend reports such as `unit-audit-findings.json`, `codeql.sarif`, or `infer-report.json` |
+| Analysis build | `stages/scan/compile_commands.json`, `linked.bc`, `build-result.json`, `analysis-library/`, and `public-install/include/` |
+| Structural evidence | `stages/scan/reachability/`, including direct call edges, function locations, include/provenance edges, and scope metadata |
+| Preprocess | `stages/preprocess/candidate_plan.json`, `structural/`, `api-doc-index.json`, `api-docs/`, `fact_base.json`, `drivers.json`, and `faiss-index/` |
+| Driver rounds | `stages/driver_rounds/result.json` and per-target event journals |
+| Final campaign | `stages/fuzz_run/plan.json`, `campaign.json`, and `result.json`; complete output is under `workspace/<lib>/fuzz_runs/` |
+| Summaries | `summary/result.json`, `summary/metrics.json`, and per-invocation orchestration summaries |
 
-各阶段日志在对应 `stages/<stage>/logs/` 下；驱动级日志在 `stages/<stage>/<driver_id>/logs/` 下。源码、二进制及探测尝试位于各驱动的阶段目录，不是顶层的 `drivers/` 目录。unit-audit 失败切片会重审，合计最多 5 轮；仍失败的切片及错误保存在报告中，scan 可能继续完成，因此 `completed` 不等于所有切片都审计成功。
+Stage logs are stored under `stages/<stage>/logs/`; driver logs are under
+`stages/<stage>/<driver_id>/logs/`. Sources, binaries, and probe attempts live
+inside their stage directories. Unit-audit retries failed slices for up to five
+rounds and preserves remaining failures in its reports. A scan marked
+`completed` does not imply every slice was audited successfully.
 
-阶段证据和事件按不可覆盖或追加方式保存；会话状态、检查点及 `summary/` 汇总会更新，并非 run 中所有文件都不可变。
+Evidence and events are immutable or append-only, while session state,
+checkpoints, and derived summaries may be updated. A summary's `completed`
+status describes the stages recorded so far; confirm that `fuzz_run` has a
+completed result before treating it as a completed end-to-end run.
 
-## 独立构建与最终测试
+## Standalone builds and final campaigns
 
-最终阶段只选择状态为 `REACHED`、且目标命中数大于零的驱动。`CRASH` 驱动不进入合并集合；最终 AFL++ 产生的崩溃需要另行去重和归因。
+The final stage selects drivers in `REACHED` state with positive target hit
+counts. Drivers classified as `CRASH` are excluded. Crashes discovered by the
+final campaign require separate deduplication and attribution.
 
 ```bash
-# 只构建合并后的 ASan+UBSan AFL++ 程序，不启动测试
+# Build the merged ASan+UBSan AFL++ binary without running a campaign.
 python3 -m src.cli.fuzz_build <lib> --run-id <run_id>
 
-# 在已有 driver_rounds 结果后执行 canonical 最终阶段
+# Run the canonical final stage after driver rounds have completed.
 python3 -m src.cli.pipeline <lib> --run-id <run_id> --only fuzz_run
 
-# 独立运行 campaign，不写 canonical stages/fuzz_run/result.json
+# Run a standalone campaign without writing the canonical stage result.
 python3 -m src.cli.fuzz_run <lib> --run-id <run_id>
 ```
 
-`fuzz_build` 和 canonical 最终阶段会准备缺失的 AFL++ 工具及库归档；独立的 `src.cli.fuzz_run` 要求先准备这些依赖。工具链可通过 `bash scripts/setup_comparison_aflpp.sh` 安装，库归档由对应 `build.sh aflpp` 构建。准备步骤可能需要联网。
+`fuzz_build` and the canonical final stage prepare missing AFL++ tools and
+library archives. The standalone `fuzz_run` entry point expects these to be
+prepared already. The setup helper is `src/fuzz_run/setup_aflpp.sh`, and each
+library's `build.sh aflpp` recipe produces its AFL++ archive. Preparation may
+require network access.
 
-独立构建的 `build.json` 记录程序哈希、驱动 selector 映射和种子信息，位于 `fuzz_builds/<run_id>/<invocation>/`。最终阶段启动时重新构建，不复用该独立构建目录。`--driver` 可重复指定以筛选驱动。
+Standalone `build.json` manifests contain the binary hash, driver-selector
+mapping, and seed information under `fuzz_builds/<run_id>/<invocation>/`.
+The final stage builds its own executable. Repeat `--driver` to select specific
+drivers.
 
-合并程序使用一字节 selector，最多支持 256 个驱动。每个初始种子只包含 selector，不附加 payload 或库语料；合并入口在没有 payload 时直接返回，需要后续变异才能进入驱动。每次 campaign 的 `result.json` 记录映射、设置和运行结果。
+The merged binary uses a one-byte selector and supports up to 256 drivers.
+Initial seeds contain only selectors, without payload or library corpus data.
+The merged entry returns immediately when no payload is present, so mutations
+are needed to enter a driver. Campaign results record the mapping, settings,
+and execution results.
 
-独立 `fuzz_run` 另有 `--detect-leaks`，为每个输入执行 LSan 检查；canonical `fuzz_run_stage` 当前未暴露该开关。
+Standalone `fuzz_run` also exposes `--detect-leaks`, enabling an LSan check for
+each input. The canonical final stage does not expose that option.
 
-`scripts/` 中还有实验专用辅助工具。跨工具对比的 selector 种子生成器为 `src/fuzz_run/selector_seeds.py`：PromeFuzz/Trace2Fuzz 使用一字节，PromptFuzz 使用双字节大端 selector；输出目录必须为空，不能混入元数据或已有 corpus。
+[selector_seeds.py](src/fuzz_run/selector_seeds.py) provides selector seeds for
+cross-tool comparisons: PromeFuzz/Trace2Fuzz use a one-byte selector, while
+PromptFuzz uses a two-byte big-endian selector. Its output directory must be
+empty and contain no metadata or existing corpus files.
 
-## 开发检查
-
-`requirements.txt` 提供运行依赖；完整执行测试还需安装 pytest（可同时收集 `unittest` 测试类和函数测试）：
-
-```bash
-python3 -m pip install -r requirements.txt pytest
-python3 -m pytest tests -v
-```
-
-只检查命令行或阶段编排时，可运行：
+## Inspecting CLI options
 
 ```bash
 python3 -m src.cli.pipeline --help
 python3 -m src.cli.pipeline <lib> --list
-python3 -m unittest discover -s tests -p 'test_fuzz_run_stage.py' -v
 ```
 
-测试依赖的原生工具按各测试中的跳过条件处理；单元测试通过不能替代完整库构建或真实模型服务自检。
+CLI and configuration checks alone do not establish that a complete library
+build, model-backed run, or final campaign has completed successfully. Inspect
+the stage results and runtime evidence for the selected run.
